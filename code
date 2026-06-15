@@ -1,0 +1,1122 @@
+#!/usr/bin/env python3
+"""
+wanwat - Dependency Download Manager
+v0.1.0-early
+"""
+
+import sys
+import os
+import subprocess
+import platform
+import json
+import time
+import datetime
+import importlib.metadata
+import shutil
+import struct
+import urllib.request
+import urllib.error
+import threading
+
+# ─── VERSION ─────────────────────────────────────────────────────────────────
+LOCAL_VERSION   = "0.1.0-early"
+VER_URL         = "https://raw.githubusercontent.com/pldsp/wanwatver/refs/heads/main/ver"
+UPDLOG_URL      = "https://raw.githubusercontent.com/pldsp/wanwatver/3f94fd92f32026de905746d250c8ca975fc07677/updlog"
+LOGS_CACHE_PATH = os.path.join(os.path.expanduser("~"), "AppData", "Local", "wanwat", "updatelogs.json")
+
+# ─── ANSI COLOR CODES ────────────────────────────────────────────────────────
+R       = "\033[0m"
+BOLD    = "\033[1m"
+DIM     = "\033[2m"
+ITALIC  = "\033[3m"
+UL      = "\033[4m"
+RED     = "\033[91m"
+GREEN   = "\033[92m"
+YELLOW  = "\033[93m"
+BLUE    = "\033[94m"
+MAGENTA = "\033[95m"
+CYAN    = "\033[96m"
+WHITE   = "\033[97m"
+BG_DARK = "\033[40m"
+# "invisible" — same as terminal background (black bg, black fg)
+# Works on dark terminals; on light terminals it's just very dim
+GHOST   = "\033[30m\033[2m"   # dark fg + dim — blends into dark bg
+
+# ─── CONFIG FILE ─────────────────────────────────────────────────────────────
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".wanwat_config.json")
+
+# ─── SECRET MODE FLAG (never saved to config) ────────────────────────────────
+_serious_mode = False   # runtime-only, never written to disk
+
+def ghost(text):
+    """Print text that blends into a dark terminal background."""
+    print(f"{GHOST}{text}{R}", flush=True)
+
+def ghost_raw(text):
+    """Return ghost-colored string without newline."""
+    return f"{GHOST}{text}{R}"
+
+# ─── WANPACK DEFINITIONS ─────────────────────────────────────────────────────
+WANPACKS = {
+    "developerpak": {
+        "description": "All developer tools — mod creation, scripting, build systems, testing & more",
+        "deps": [
+            "setuptools", "wheel", "build", "twine", "flit", "poetry-core",
+            "black", "isort", "flake8", "pylint", "mypy", "pyright",
+            "pytest", "pytest-cov", "pytest-mock", "pytest-asyncio", "hypothesis",
+            "tox", "nox", "pre-commit", "bumpversion",
+            "sphinx", "sphinx-rtd-theme", "mkdocs", "pdoc3",
+            "rich", "click", "typer", "argparse",
+            "colorama", "termcolor", "pyfiglet", "tqdm",
+            "ipython", "jupyter", "notebook", "ipykernel",
+            "debugpy", "pydevd", "pyinstrument", "scalene",
+            "pycparser", "ply", "lark", "pyparsing",
+            "Cython", "cffi", "ctypes-callable",
+            "watchdog", "schedule", "apscheduler",
+            "gitpython", "pygit2", "dulwich",
+            "pyinstaller", "cx-Freeze", "nuitka",
+            "pynput", "keyboard", "mouse",
+            "loguru", "structlog", "logging-json",
+            "dotenv", "python-dotenv", "dynaconf",
+            "toml", "tomllib", "configparser",
+        ]
+    },
+    "essentialspak": {
+        "description": "Core essentials — basic Python libraries, Windows utilities & system tools",
+        "deps": [
+            "pip", "setuptools", "wheel",
+            "requests", "urllib3", "certifi", "httpx", "aiohttp",
+            "Pillow", "imageio",
+            "numpy", "scipy", "pandas",
+            "matplotlib", "seaborn",
+            "cryptography", "bcrypt", "PyJWT",
+            "pywin32", "pywinctl", "pygetwindow",
+            "psutil", "py-cpuinfo", "GPUtil",
+            "colorama", "rich", "tqdm",
+            "click", "typer",
+            "python-dateutil", "pytz", "arrow",
+            "pydantic", "attrs", "dataclasses-json",
+            "pyserial", "pyusb",
+            "zipfile36", "py7zr", "rarfile",
+            "chardet", "charset-normalizer",
+            "six", "future", "typing-extensions",
+            "packaging", "platformdirs", "appdirs",
+            "pathlib2", "send2trash",
+            "clipboard", "pyperclip",
+            "sounddevice", "playsound",
+            "regex", "fuzzywuzzy", "python-Levenshtein",
+        ]
+    },
+    "webpak": {
+        "description": "Web development — frameworks, scraping, APIs & networking",
+        "deps": [
+            "flask", "flask-cors", "flask-sqlalchemy", "flask-login",
+            "django", "djangorestframework", "django-cors-headers",
+            "fastapi", "uvicorn", "starlette", "gunicorn",
+            "requests", "httpx", "aiohttp", "websockets", "websocket-client",
+            "beautifulsoup4", "lxml", "html5lib", "scrapy",
+            "selenium", "playwright", "mechanize",
+            "certifi", "urllib3", "httpcore",
+            "jwt", "authlib", "oauthlib",
+            "jinja2", "mako", "chameleon",
+            "wtforms", "marshmallow", "cerberus",
+            "sqlalchemy", "alembic", "tortoise-orm",
+            "redis", "celery", "dramatiq",
+            "stripe", "twilio", "sendgrid",
+        ]
+    },
+    "datapak": {
+        "description": "Data science & ML — analysis, visualisation, machine learning",
+        "deps": [
+            "numpy", "scipy", "pandas", "polars",
+            "matplotlib", "seaborn", "plotly", "bokeh", "altair",
+            "scikit-learn", "xgboost", "lightgbm", "catboost",
+            "tensorflow", "keras", "torch", "torchvision",
+            "transformers", "tokenizers", "datasets",
+            "nltk", "spacy", "gensim", "textblob",
+            "opencv-python", "scikit-image", "albumentations",
+            "statsmodels", "pingouin",
+            "jupyterlab", "notebook", "voila",
+            "dask", "vaex", "modin",
+            "sqlalchemy", "pymongo", "psycopg2", "pymysql",
+            "openpyxl", "xlrd", "xlwt",
+            "pyarrow", "fastparquet", "h5py",
+        ]
+    },
+    "gamepak": {
+        "description": "Game development & modding — engines, graphics, audio & tools",
+        "deps": [
+            "pygame", "pygame-ce", "pyglet", "arcade",
+            "panda3d", "moderngl", "pyopengl", "glfw",
+            "pymunk", "pybox2d",
+            "sounddevice", "pydub",
+            "Pillow", "imageio",
+            "noise", "opensimplex",
+            "pyinstaller", "cx-Freeze",
+            "twisted", "pyzmq",
+            "pywin32", "pynput", "keyboard",
+            "esper",
+            "pytmx",
+        ]
+    },
+    "securitypak": {
+        "description": "Cybersecurity & cryptography tools",
+        "deps": [
+            "cryptography", "pycryptodome", "pycryptodomex",
+            "bcrypt", "argon2-cffi", "passlib",
+            "PyJWT", "authlib", "oauthlib",
+            "paramiko", "fabric", "pysftp",
+            "scapy",
+            "pyOpenSSL", "truststore",
+            "keyring", "secretstorage",
+            "bandit", "safety", "pip-audit",
+            "yara-python",
+        ]
+    },
+}
+
+# ─── COMPATIBILITY MAP ────────────────────────────────────────────────────────
+COMPAT = {
+    "pyright":           {"min": (3, 8),  "max": None,   "note": ""},
+    "tensorflow":        {"min": (3, 9),  "max": (3, 12),"note": "No Python 3.13 support yet"},
+    "torch":             {"min": (3, 9),  "max": (3, 12),"note": "Limited 3.13 support"},
+    "Cython":            {"min": (3, 6),  "max": None,   "note": ""},
+    "pywin32":           {"min": (3, 6),  "max": None,   "note": "Windows only"},
+    "pywinctl":          {"min": (3, 7),  "max": None,   "note": "Windows/macOS/Linux"},
+    "pygetwindow":       {"min": (3, 6),  "max": None,   "note": "Windows only"},
+    "panda3d":           {"min": (3, 7),  "max": (3, 12),"note": "Partial 3.13"},
+    "nuitka":            {"min": (3, 4),  "max": None,   "note": ""},
+    "cx-Freeze":         {"min": (3, 8),  "max": None,   "note": ""},
+    "dask":              {"min": (3, 9),  "max": None,   "note": ""},
+    "vaex":              {"min": (3, 7),  "max": (3, 11),"note": "Issues on 3.12+"},
+    "scapy":             {"min": (3, 7),  "max": None,   "note": "Root/admin may be needed"},
+    "yara-python":       {"min": (3, 7),  "max": None,   "note": "Requires libyara"},
+    "pyserial":          {"min": (3, 6),  "max": None,   "note": ""},
+    "pyusb":             {"min": (3, 6),  "max": None,   "note": "Requires libusb"},
+    "playsound":         {"min": (3, 6),  "max": (3, 11),"note": "Broken on 3.12 in some setups"},
+    "catboost":          {"min": (3, 7),  "max": (3, 12),"note": "No 3.13 wheel yet"},
+    "lightgbm":          {"min": (3, 7),  "max": None,   "note": ""},
+    "voila":             {"min": (3, 8),  "max": None,   "note": ""},
+    "pybox2d":           {"min": (3, 6),  "max": (3, 11),"note": "Build may fail on 3.12+"},
+    "esper":             {"min": (3, 7),  "max": None,   "note": ""},
+    "tiled":             {"min": (3, 8),  "max": None,   "note": ""},
+    "clipboard":         {"min": (3, 6),  "max": None,   "note": ""},
+    "ctypes-callable":   {"min": (3, 6),  "max": None,   "note": ""},
+    "zipfile36":         {"min": (3, 6),  "max": (3, 9), "note": "stdlib covers 3.10+"},
+    "pathlib2":          {"min": (3, 6),  "max": (3, 9), "note": "Redundant on 3.10+"},
+    "secretstorage":     {"min": (3, 6),  "max": None,   "note": "Linux only"},
+}
+
+# ─── HELPERS ─────────────────────────────────────────────────────────────────
+
+def clear():
+    os.system("cls" if os.name == "nt" else "clear")
+
+def python_version():
+    return sys.version_info
+
+def python_version_str():
+    v = sys.version_info
+    return f"{v.major}.{v.minor}.{v.micro}"
+
+def is_installed(pkg):
+    try:
+        importlib.metadata.version(pkg)
+        return True
+    except importlib.metadata.PackageNotFoundError:
+        return False
+
+def get_installed_version(pkg):
+    try:
+        return importlib.metadata.version(pkg)
+    except Exception:
+        return None
+
+def check_compat(pkg):
+    pv   = python_version()
+    info = COMPAT.get(pkg)
+    if not info:
+        return ("ok", "")
+    mn, mx, note = info["min"], info["max"], info["note"]
+    if pv < mn:
+        return ("unsupported", f"Requires Python {mn[0]}.{mn[1]}+. {note}".strip())
+    if mx and pv > mx:
+        return ("partial", f"Tested up to {mx[0]}.{mx[1]}. {note}".strip())
+    return ("ok", note if note else "")
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    return {"selected": [], "installed": [], "dev_mode": False}
+
+def save_config(cfg):
+    # Never save serious mode — strip any accidental key
+    cfg.pop("serious_mode", None)
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+def all_deps():
+    deps = []
+    for pk in WANPACKS.values():
+        for d in pk["deps"]:
+            if d not in deps:
+                deps.append(d)
+    return deps
+
+def sep(char="─", color=DIM):
+    w = shutil.get_terminal_size((80, 20)).columns
+    print(f"{color}{char * w}{R}")
+
+def ts():
+    """Current timestamp string."""
+    return datetime.datetime.now().strftime("%H:%M:%S %d.%m.%Y")
+
+# ─── VERSION & UPDATE LOG ────────────────────────────────────────────────────
+
+def fetch_url(url, timeout=6):
+    """Fetch a URL and return text or None on error."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "wanwat/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode("utf-8").strip()
+    except Exception as e:
+        return None
+
+def get_remote_version():
+    return fetch_url(VER_URL)
+
+def get_remote_updlog():
+    return fetch_url(UPDLOG_URL)
+
+def ensure_logs_dir():
+    d = os.path.dirname(LOGS_CACHE_PATH)
+    os.makedirs(d, exist_ok=True)
+
+def load_cached_logs():
+    if os.path.exists(LOGS_CACHE_PATH):
+        try:
+            with open(LOGS_CACHE_PATH) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_cached_logs(data):
+    ensure_logs_dir()
+    with open(LOGS_CACHE_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+def version_outdated(remote):
+    """Simple string compare — not up to date if they differ."""
+    if remote is None:
+        return False
+    return remote.strip() != LOCAL_VERSION.strip()
+
+# ─── STARTUP CHECK ───────────────────────────────────────────────────────────
+
+def startup_version_check():
+    """
+    Called once at launch. Checks remote version, shows update prompt if needed.
+    Also saves/loads update logs to C:/Users/.../AppData/Local/wanwat/
+    """
+    remote_ver  = get_remote_version()
+    remote_log  = get_remote_updlog()
+    now_ts      = ts()
+    cache       = load_cached_logs()
+
+    # Save remote log to cache if we got it
+    if remote_log:
+        if remote_ver not in cache:
+            cache[remote_ver] = {"log": remote_log, "fetched": now_ts}
+        # Always keep local version entry too
+        if LOCAL_VERSION not in cache:
+            cache[LOCAL_VERSION] = {"log": "(no log cached for this version)", "fetched": now_ts}
+        save_cached_logs(cache)
+
+    outdated = version_outdated(remote_ver)
+
+    clear()
+    # ── Header ──
+    print(f"\n{CYAN}{BOLD}")
+    print("  ╔══════════════════════════════════════════════════════════════╗")
+    print("  ║    ██╗    ██╗ █████╗ ███╗  ██╗██╗    ██╗ █████╗ ████████╗  ║")
+    print("  ║    ██║    ██║██╔══██╗████╗ ██║██║    ██║██╔══██╗╚══██╔══╝  ║")
+    print("  ║    ██║ █╗ ██║███████║██╔██╗██║██║ █╗ ██║███████║   ██║     ║")
+    print("  ║    ██║███╗██║██╔══██║██║╚████║██║███╗██║██╔══██║   ██║     ║")
+    print("  ║    ╚███╔███╔╝██║  ██║██║ ╚███║╚███╔███╔╝██║  ██║   ██║     ║")
+    print("  ║     ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚══╝╚══╝╚══╝ ╚═╝  ╚═╝   ╚═╝     ║")
+    print("  ╚══════════════════════════════════════════════════════════════╝")
+    print(R)
+    print(f"  {MAGENTA}{BOLD}Dependency Download Manager{R}  {DIM}v{LOCAL_VERSION}{R}")
+    print(f"  {DIM}Python {python_version_str()} · {platform.system()} {platform.release()}{R}")
+    sep()
+
+    # ── Version status line ──
+    if remote_ver is None:
+        print(f"\n  {DIM}version check  {YELLOW}unavailable (no connection){R}")
+        print(f"  {DIM}local  {WHITE}{LOCAL_VERSION}{R}  ·  {now_ts}{R}")
+    elif outdated:
+        newest_log_entry = cache.get(remote_ver, {}).get("fetched", "?")
+        print(f"\n  {DIM}version  {WHITE}{LOCAL_VERSION}{R}  ·  {now_ts}")
+        print(f"           {YELLOW}newest  {WHITE}{remote_ver}{R}  ·  {newest_log_entry}")
+        sep()
+        print(f"\n  {YELLOW}{BOLD}⬆  A new version is available: {remote_ver}{R}\n")
+        if remote_log:
+            print(f"  {BOLD}Newest update log:{R}")
+            for line in remote_log.splitlines():
+                print(f"    {DIM}•{R} {line}")
+        print(f"\n  {BOLD}Do you want to update to {remote_ver}?{R}  {DIM}[y/N]{R}  ", end="")
+        ans = input().strip().lower()
+        if ans in ("y", "yes"):
+            print(f"\n  {YELLOW}Auto-update not yet implemented. Visit the repo to update manually.{R}")
+            print(f"  {DIM}https://github.com/pldsp/wanwatver{R}\n")
+            input(f"  {DIM}Press Enter to continue...{R}")
+    else:
+        print(f"\n  {GREEN}✓ Up to date{R}  {DIM}{LOCAL_VERSION}  ·  {now_ts}{R}")
+
+    # ── Newest log teaser at the bottom ──
+    if remote_log and outdated:
+        pass  # already shown above
+    elif remote_log:
+        print(f"\n  {DIM}────  newest update log  ────{R}")
+        for line in remote_log.splitlines():
+            print(f"  {DIM}{line}{R}")
+
+    print()
+    sep()
+    input(f"  {DIM}Press Enter to continue to wanwat...{R}")
+
+# ─── BANNER (compact, for menu redraws) ─────────────────────────────────────
+
+def banner(cfg=None, remote_ver=None):
+    w    = shutil.get_terminal_size((80, 20)).columns
+    now  = ts()
+    outdated = version_outdated(remote_ver) if remote_ver else False
+
+    print(f"\n{CYAN}{BOLD}  wanwat{R}  {DIM}v{LOCAL_VERSION}{R}", end="")
+
+    if outdated:
+        print(f"  {YELLOW}⬆ update available: {remote_ver}{R}", end="")
+    print()
+
+    ver_line = f"  {DIM}{now}{R}"
+    if outdated and remote_ver:
+        cache = load_cached_logs()
+        newest_ts = cache.get(remote_ver, {}).get("fetched", "?")
+        ver_line += f"  {DIM}/{R}  {YELLOW}newest {newest_ts}{R}"
+    print(ver_line)
+    print(f"  {DIM}Python {python_version_str()} · {platform.system()} {platform.release()}{R}")
+    sep()
+
+# ─── SERIOUS MODE (SECRET) ────────────────────────────────────────────────────
+# Enabled by typing "serious" at any wanwat> prompt.
+# Never shown in menus, never saved to config.
+# Text is printed in GHOST color (dark fg + dim) — blends into dark terminal backgrounds.
+
+def serious_log(msg):
+    """Print a raw/debug line in ghost color if serious mode is on."""
+    global _serious_mode
+    if _serious_mode:
+        now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        ghost(f"[{now}] {msg}")
+
+def serious_banner():
+    clear()
+    w = shutil.get_terminal_size((80, 20)).columns
+    # Print in ghost — nearly invisible on dark terminal
+    ghost("=" * w)
+    ghost("  SERIOUS MODE  —  raw command stream active")
+    ghost("  all pip commands, subprocess calls and internal ops will be shown")
+    ghost("  this mode is not saved and will not appear in config")
+    ghost("=" * w)
+    print()
+
+# ─── INSTALL LOGIC ───────────────────────────────────────────────────────────
+
+def confirm_install(deps):
+    pv_str    = python_version_str()
+    already   = [d for d in deps if is_installed(d)]
+    to_install = [d for d in deps if not is_installed(d)]
+
+    incompatible = []
+    partial      = []
+    for d in to_install:
+        status, note = check_compat(d)
+        if status == "unsupported":
+            incompatible.append((d, note))
+        elif status == "partial":
+            partial.append((d, note))
+
+    sep()
+    print(f"\n{BOLD}{YELLOW}  ⚠  Installation Confirmation{R}\n")
+
+    if already:
+        print(f"  {GREEN}✓ Already installed — skipping ({len(already)}):{R}")
+        for pkg in already:
+            ver = get_installed_version(pkg)
+            print(f"    {DIM}• {pkg}  {ver}{R}")
+        print()
+
+    if not to_install:
+        print(f"  {GREEN}{BOLD}All selected packages are already installed!{R}\n")
+        input(f"  {DIM}Press Enter to continue...{R}")
+        return False, []
+
+    print(f"  Will install  {CYAN}{BOLD}{len(to_install)}{R} package(s)")
+    print(f"  Python version  {GREEN}{BOLD}{pv_str}{R}\n")
+
+    if incompatible:
+        print(f"  {RED}{BOLD}✗ Incompatible with Python {pv_str}:{R}")
+        for pkg, note in incompatible:
+            print(f"    {RED}• {pkg:<28}{R} {DIM}{note}{R}")
+        print()
+
+    if partial:
+        print(f"  {YELLOW}{BOLD}~ Partially supported on Python {pv_str}:{R}")
+        for pkg, note in partial:
+            print(f"    {YELLOW}• {pkg:<28}{R} {DIM}{note}{R}")
+        print()
+
+    if not incompatible and not partial:
+        print(f"  {GREEN}✓ All packages appear compatible.{R}\n")
+
+    print(f"  {DIM}Tip: press Ctrl+C during install to cancel safely.{R}\n")
+    print(f"  {BOLD}Continue?{R}  {DIM}[y/N]{R}  ", end="")
+    ans = input().strip().lower()
+    return ans in ("y", "yes"), to_install
+
+
+def install_deps(deps, dev_mode=False):
+    global _serious_mode
+    if not deps:
+        print(f"\n  {YELLOW}No packages selected.{R}\n")
+        return []
+
+    confirmed, to_install = confirm_install(deps)
+    if not confirmed or not to_install:
+        if confirmed and not to_install:
+            pass
+        else:
+            print(f"\n  {YELLOW}Installation cancelled.{R}\n")
+        return []
+
+    print(f"\n  {CYAN}{BOLD}Installing {len(to_install)} package(s)...{R}")
+    print(f"  {DIM}Ctrl+C = cancel at any time{R}\n")
+    sep()
+
+    ok, failed, skipped = [], [], []
+    cancelled = False
+
+    for i, pkg in enumerate(to_install, 1):
+        pct     = int((i / len(to_install)) * 100)
+        blen    = 26
+        filled  = int(blen * i // len(to_install))
+        bar     = f"{GREEN}{'█' * filled}{DIM}{'░' * (blen - filled)}{R}"
+        print(f"  [{bar}] {pct:3d}%  {CYAN}{pkg:<30}{R}  {DIM}({i}/{len(to_install)}){R}", flush=True)
+
+        if is_installed(pkg):
+            skipped.append(pkg)
+            print(f"         {DIM}↷ already installed, skipping{R}")
+            serious_log(f"SKIP {pkg} — already installed")
+            continue
+
+        cmd = [sys.executable, "-m", "pip", "install", pkg,
+               "--quiet", "--disable-pip-version-check"]
+        serious_log(f"CMD  {' '.join(cmd)}")
+
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True)
+            try:
+                stdout, stderr = proc.communicate(timeout=120)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                raise TimeoutError(f"timed out after 120s")
+
+            serious_log(f"RC   {proc.returncode}")
+            if stderr.strip():
+                serious_log(f"STDERR >> {stderr.strip()[:200]}")
+
+            if proc.returncode == 0:
+                ok.append(pkg)
+                print(f"         {GREEN}✓ installed{R}")
+            else:
+                err_lines = [l.strip() for l in stderr.splitlines() if l.strip()]
+                err_msg = next(
+                    (l for l in reversed(err_lines) if l.lower().startswith("error")),
+                    err_lines[-1] if err_lines else "unknown error"
+                )
+                failed.append((pkg, err_msg))
+                print(f"         {RED}✗ failed  {DIM}{err_msg[:68]}{R}")
+                serious_log(f"FAIL {pkg} — {err_msg}")
+
+                print(f"\n  {YELLOW}'{pkg}' failed.{R}  Continue?  {DIM}[Y/n]{R}  ", end="")
+                try:
+                    ans = input().strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    cancelled = True; break
+                if ans in ("n", "no"):
+                    cancelled = True
+                    print(f"\n  {YELLOW}Stopping at user request.{R}")
+                    break
+                print()
+
+        except TimeoutError as e:
+            failed.append((pkg, str(e)))
+            print(f"         {RED}✗ {e}{R}")
+            serious_log(f"TIMEOUT {pkg}")
+            print(f"\n  {YELLOW}'{pkg}' timed out.{R}  Continue?  {DIM}[Y/n]{R}  ", end="")
+            try:
+                ans = input().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                cancelled = True; break
+            if ans in ("n", "no"):
+                cancelled = True; break
+            print()
+
+        except KeyboardInterrupt:
+            print(f"\n\n  {YELLOW}{BOLD}⚠  Cancelled by user (Ctrl+C){R}")
+            serious_log("INTERRUPTED by KeyboardInterrupt")
+            cancelled = True
+            break
+
+        except Exception as e:
+            failed.append((pkg, str(e)))
+            print(f"         {RED}✗ {str(e)[:68]}{R}")
+            serious_log(f"EXCEPTION {pkg} — {e}")
+            print(f"\n  {YELLOW}Error on '{pkg}'.{R}  Continue?  {DIM}[Y/n]{R}  ", end="")
+            try:
+                ans = input().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                cancelled = True; break
+            if ans in ("n", "no"):
+                cancelled = True; break
+            print()
+
+    print()
+    sep()
+
+    remaining = len(to_install) - len(ok) - len(failed) - len(skipped)
+    if cancelled and remaining > 0:
+        print(f"\n  {YELLOW}⚠  Cancelled  —  {remaining} package(s) not attempted{R}\n")
+
+    print(f"  {GREEN}{BOLD}✓ Installed: {len(ok):<4}{R}"
+          f"  {YELLOW}{BOLD}↷ Skipped: {len(skipped):<4}{R}"
+          f"  {RED}{BOLD}✗ Failed: {len(failed)}{R}\n")
+
+    if skipped:
+        print(f"  {DIM}Skipped: {', '.join(skipped)}{R}\n")
+
+    if failed:
+        print(f"  {RED}Failed packages:{R}")
+        for pkg, err in failed:
+            print(f"    {RED}• {pkg:<28}{R} {DIM}{err[:68]}{R}")
+        print()
+
+    return ok
+
+# ─── UPDATE LOGS MENU ────────────────────────────────────────────────────────
+
+def update_logs_menu():
+    global _serious_mode
+    while True:
+        clear()
+        print(f"\n{CYAN}{BOLD}  wanwat{R}  {DIM}v{LOCAL_VERSION}{R}")
+        sep()
+        print(f"\n  {BOLD}{MAGENTA}📋 Update Logs{R}\n")
+        print(f"  {BOLD}1.{R}  View latest log  {DIM}(fetch from GitHub){R}")
+        print(f"  {BOLD}2.{R}  View raw log data  {DIM}(unprocessed GitHub response){R}")
+        print(f"  {BOLD}3.{R}  View version info  {DIM}(local vs remote){R}")
+        print(f"  {BOLD}4.{R}  View cached logs  {DIM}(saved to your PC){R}")
+        print(f"  {BOLD}5.{R}  Back\n")
+        sep()
+        print(f"\n  {DIM}Choice:{R} ", end="")
+        choice = input().strip()
+
+        if choice == "1":
+            clear()
+            print(f"\n{CYAN}{BOLD}  Update Log{R}  {DIM}fetching...{R}\n")
+            serious_log(f"FETCH {UPDLOG_URL}")
+            log = get_remote_updlog()
+            ver = get_remote_version()
+            sep()
+            if log is None:
+                print(f"\n  {RED}✗ Could not reach GitHub. Check your connection.{R}")
+                print(f"  {DIM}URL: {UPDLOG_URL}{R}\n")
+            else:
+                serious_log(f"RESPONSE length={len(log)}")
+                print(f"\n  {BOLD}Update log for {CYAN}{ver or '?'}{R}\n")
+                for line in log.splitlines():
+                    print(f"    {DIM}•{R}  {line}")
+                # cache
+                cache = load_cached_logs()
+                if ver and ver not in cache:
+                    cache[ver] = {"log": log, "fetched": ts()}
+                    save_cached_logs(cache)
+                print(f"\n  {DIM}Fetched at {ts()}{R}")
+            print()
+            input(f"  {DIM}Press Enter to go back...{R}")
+
+        elif choice == "2":
+            clear()
+            print(f"\n{CYAN}{BOLD}  Raw Log Data{R}  {DIM}from GitHub{R}\n")
+            serious_log(f"FETCH RAW {UPDLOG_URL}")
+            raw = fetch_url(UPDLOG_URL)
+            ver_raw = fetch_url(VER_URL)
+            sep()
+            if raw is None:
+                print(f"\n  {RED}✗ Failed to fetch raw data.{R}")
+                print(f"  {DIM}URL: {UPDLOG_URL}{R}\n")
+            else:
+                print(f"\n  {DIM}URL:{R}  {UPDLOG_URL}")
+                print(f"  {DIM}Version URL:{R}  {VER_URL}")
+                print(f"  {DIM}Fetched:{R}  {ts()}\n")
+                sep("·")
+                print(f"\n{WHITE}{raw}{R}\n")
+                sep("·")
+                print(f"\n  {DIM}ver file raw:{R}  {WHITE}{ver_raw}{R}\n")
+            input(f"  {DIM}Press Enter to go back...{R}")
+
+        elif choice == "3":
+            clear()
+            print(f"\n{CYAN}{BOLD}  Version Info{R}\n")
+            serious_log(f"FETCH VERSION {VER_URL}")
+            remote = get_remote_version()
+            sep()
+            now = ts()
+            print(f"\n  {BOLD}Local version:{R}   {CYAN}{LOCAL_VERSION}{R}")
+            print(f"  {BOLD}Remote version:{R}  ", end="")
+            if remote is None:
+                print(f"{YELLOW}unavailable{R}  {DIM}(no connection){R}")
+            elif version_outdated(remote):
+                print(f"{YELLOW}{remote}{R}  {RED}← update available{R}")
+            else:
+                print(f"{GREEN}{remote}{R}  {DIM}(up to date){R}")
+            print(f"\n  {DIM}Checked at  {now}{R}")
+            cache = load_cached_logs()
+            if remote and remote in cache:
+                cached_ts = cache[remote].get("fetched", "?")
+                print(f"  {DIM}Log cached  {cached_ts}{R}")
+            print(f"  {DIM}Cache path  {LOGS_CACHE_PATH}{R}\n")
+            input(f"  {DIM}Press Enter...{R}")
+
+        elif choice == "4":
+            clear()
+            print(f"\n{CYAN}{BOLD}  Cached Logs{R}  {DIM}({LOGS_CACHE_PATH}){R}\n")
+            cache = load_cached_logs()
+            sep()
+            if not cache:
+                print(f"\n  {YELLOW}No cached logs found.{R}\n")
+            else:
+                for ver_key, entry in cache.items():
+                    tag = f"  {GREEN}← current{R}" if ver_key == LOCAL_VERSION else ""
+                    print(f"\n  {BOLD}{CYAN}{ver_key}{R}{tag}  {DIM}fetched {entry.get('fetched','?')}{R}")
+                    for line in entry.get("log", "").splitlines():
+                        print(f"    {DIM}•{R}  {line}")
+            print()
+            input(f"  {DIM}Press Enter...{R}")
+
+        elif choice == "5":
+            break
+        else:
+            print(f"\n  {YELLOW}Unknown option.{R}")
+            time.sleep(0.8)
+
+# ─── DEPS MENU ───────────────────────────────────────────────────────────────
+
+def deps_menu(cfg, dev_mode=False, remote_ver=None):
+    while True:
+        clear()
+        banner(cfg, remote_ver)
+        print(f"\n  {BOLD}{MAGENTA}📦 Dependencies{R}\n")
+        sep("·")
+        print(f"\n  {BOLD}1{R}  Browse & toggle packages")
+        print(f"  {BOLD}2{R}  Wanpacks  {DIM}(bulk install presets){R}")
+        print(f"  {BOLD}3{R}  View installed")
+        print(f"  {BOLD}4{R}  Reset selection to default  {DIM}(all){R}")
+        print(f"  {BOLD}5{R}  Back\n")
+        sep()
+        print(f"\n  {DIM}deps>{R} ", end="")
+        choice = input().strip()
+
+        if choice == "1":
+            toggle_packages(cfg, dev_mode)
+        elif choice == "2":
+            choose_wanpack(cfg, dev_mode)
+        elif choice == "3":
+            show_installed()
+        elif choice == "4":
+            resetdeps(cfg)
+        elif choice == "5":
+            break
+        else:
+            print(f"\n  {YELLOW}Unknown option.{R}")
+            time.sleep(0.8)
+
+def toggle_packages(cfg, dev_mode=False):
+    all_pkgs  = all_deps()
+    selected  = set(cfg.get("selected", all_pkgs))
+    page_size = 18
+    page      = 0
+    total_pages = (len(all_pkgs) + page_size - 1) // page_size
+
+    while True:
+        clear()
+        print(f"\n{CYAN}{BOLD}  wanwat{R}  {DIM}Toggle Packages  (page {page+1}/{total_pages}){R}\n")
+        sep()
+
+        start = page * page_size
+        chunk = all_pkgs[start:start + page_size]
+
+        for i, pkg in enumerate(chunk, 1):
+            tick        = f"{GREEN}✓{R}" if pkg in selected else f"{DIM}·{R}"
+            compat, _   = check_compat(pkg)
+            tag = ""
+            if compat == "unsupported":
+                tag = f" {RED}[!]{R}"
+            elif compat == "partial":
+                tag = f" {YELLOW}[~]{R}"
+            inst = f"  {DIM}installed{R}" if is_installed(pkg) else ""
+            print(f"  {DIM}{i:2}.{R} [{tick}] {CYAN}{pkg}{R}{tag}{inst}")
+
+        sel_count = len(selected)
+        print(f"\n  {DIM}selected: {sel_count}  ·  [n]ext  [p]rev  [#] toggle  [a]ll  [x] none  [q] back{R}\n")
+        sep()
+        print(f"\n  {DIM}toggle>{R} ", end="")
+        inp = input().strip().lower()
+
+        if inp == "q":
+            break
+        elif inp == "n" and page < total_pages - 1:
+            page += 1
+        elif inp == "p" and page > 0:
+            page -= 1
+        elif inp == "a":
+            selected = set(all_pkgs)
+        elif inp == "x":
+            selected = set()
+        elif inp.isdigit():
+            idx = int(inp) - 1
+            if 0 <= idx < len(chunk):
+                pkg = chunk[idx]
+                if pkg in selected:
+                    selected.discard(pkg)
+                else:
+                    selected.add(pkg)
+
+    cfg["selected"] = list(selected)
+    save_config(cfg)
+
+def choose_wanpack(cfg, dev_mode=False):
+    while True:
+        clear()
+        print(f"\n{CYAN}{BOLD}  wanwat{R}  {DIM}Wanpacks{R}\n")
+        sep()
+        names = list(WANPACKS.keys())
+        for i, name in enumerate(names, 1):
+            desc  = WANPACKS[name]["description"]
+            count = len(WANPACKS[name]["deps"])
+            inst  = sum(1 for d in WANPACKS[name]["deps"] if is_installed(d))
+            pct   = int(inst / count * 100) if count else 0
+            bar   = f"{GREEN}{'▪' * (pct // 10)}{DIM}{'▫' * (10 - pct // 10)}{R}"
+            print(f"\n  {BOLD}{i}.{R}  {CYAN}{name}{R}  {DIM}{inst}/{count} installed{R}  [{bar}]")
+            print(f"      {DIM}{desc}{R}")
+
+        print(f"\n  {BOLD}{len(names)+1}.{R}  Install ALL wanpacks\n")
+        sep()
+        print(f"  {DIM}[q] back{R}\n")
+        print(f"  {DIM}wanpack>{R} ", end="")
+        inp = input().strip().lower()
+
+        if inp == "q":
+            break
+        elif inp.isdigit():
+            idx = int(inp) - 1
+            if idx == len(names):
+                deps = list({d for pk in WANPACKS.values() for d in pk["deps"]})
+                installed_ok = install_deps(deps, dev_mode)
+                if installed_ok:
+                    cfg["installed"] = list(set(cfg.get("installed", []) + installed_ok))
+                    save_config(cfg)
+                input(f"\n  {DIM}Press Enter...{R}")
+            elif 0 <= idx < len(names):
+                name = names[idx]
+                deps = WANPACKS[name]["deps"]
+                clear()
+                print(f"\n{CYAN}{BOLD}  {name}{R}  — {DIM}{WANPACKS[name]['description']}{R}\n")
+                sep()
+                for d in deps:
+                    compat, note = check_compat(d)
+                    tag = ""
+                    if compat == "unsupported":
+                        tag = f"  {RED}[incompatible]{R}"
+                    elif compat == "partial":
+                        tag = f"  {YELLOW}[partial]{R}"
+                    inst = f"  {GREEN}installed{R}" if is_installed(d) else ""
+                    print(f"  {DIM}•{R}  {d}{tag}{inst}")
+                print()
+                installed_ok = install_deps(deps, dev_mode)
+                if installed_ok:
+                    cfg["installed"] = list(set(cfg.get("installed", []) + installed_ok))
+                    save_config(cfg)
+                input(f"\n  {DIM}Press Enter...{R}")
+
+def show_installed():
+    clear()
+    print(f"\n{CYAN}{BOLD}  wanwat{R}  {DIM}Installed Packages{R}\n")
+    sep()
+    all_pkgs = all_deps()
+    found    = [(p, get_installed_version(p)) for p in all_pkgs if is_installed(p)]
+    if found:
+        for pkg, ver in found:
+            print(f"  {GREEN}✓{R}  {pkg:<34} {DIM}{ver}{R}")
+        print(f"\n  {DIM}total: {len(found)}{R}")
+    else:
+        print(f"\n  {YELLOW}No wanwat-tracked packages found installed.{R}")
+    print()
+    input(f"  {DIM}Press Enter...{R}")
+
+def resetdeps(cfg):
+    clear()
+    print(f"\n{CYAN}{BOLD}  wanwat{R}  {DIM}Reset Dependencies{R}\n")
+    sep()
+    print(f"\n  {YELLOW}This will reset your selection to {BOLD}all packages{R}{YELLOW} (default).{R}")
+    print(f"  {DIM}Installed packages on your system are not affected.{R}\n")
+    print(f"  {BOLD}Confirm?{R}  {DIM}[y/N]{R}  ", end="")
+    if input().strip().lower() in ("y", "yes"):
+        cfg["selected"] = all_deps()
+        save_config(cfg)
+        print(f"\n  {GREEN}✓ Selection reset.{R}\n")
+    else:
+        print(f"\n  {YELLOW}Cancelled.{R}\n")
+    time.sleep(1)
+
+# ─── DEVELOPER MODE ──────────────────────────────────────────────────────────
+
+def dev_info():
+    info = {}
+    info["python"]    = sys.version
+    info["platform"]  = platform.platform()
+    info["system"]    = platform.system()
+    info["node"]      = platform.node()
+    info["release"]   = platform.release()
+    info["machine"]   = platform.machine()
+    info["processor"] = platform.processor()
+    info["arch"]      = platform.architecture()[0]
+    info["bits"]      = struct.calcsize("P") * 8
+    info["cpu_count"] = os.cpu_count()
+    info["exe"]       = sys.executable
+    info["prefix"]    = sys.prefix
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        info["ram_total"] = f"{mem.total // (1024**3)} GB"
+        info["ram_used"]  = f"{mem.used  // (1024**3)} GB"
+        info["ram_pct"]   = f"{mem.percent}%"
+        disk = psutil.disk_usage("/" if os.name != "nt" else "C:\\")
+        info["disk_total"] = f"{disk.total // (1024**3)} GB"
+        info["disk_used"]  = f"{disk.used  // (1024**3)} GB"
+    except ImportError:
+        info["ram_total"] = "install psutil for RAM/disk info"
+    return info
+
+def dev_time():
+    return f"{BLUE}{datetime.datetime.now().strftime('%H:%M:%S')}{R}"
+
+def developer_mode_menu(cfg):
+    global _serious_mode
+    clear()
+    info = dev_info()
+
+    print(f"{BOLD}{CYAN}")
+    print("  ╔══════════════════════════════════════════════════════════╗")
+    print("  ║         wanwat  ·  developer mode  ·  debug ON          ║")
+    print("  ╚══════════════════════════════════════════════════════════╝")
+    print(R)
+
+    def row(label, val):
+        print(f"  {DIM}{label:<22}{R} {CYAN}{val}{R}")
+
+    serious_tag = f"  {ghost_raw('[serious active]')}" if _serious_mode else ""
+    print(f"  {dev_time()}  {DIM}System{R}{serious_tag}")
+    sep("─", DIM)
+    row("Python",        info["python"].split()[0])
+    row("Platform",      info["platform"])
+    row("Machine",       info["machine"])
+    row("Processor",     info["processor"] or "unknown")
+    row("Architecture",  info["arch"])
+    row("Pointer size",  f"{info['bits']}-bit")
+    row("CPU cores",     str(info["cpu_count"]))
+    if "ram_total" in info and "GB" in str(info.get("ram_total","")):
+        row("RAM total",  info["ram_total"])
+        row("RAM used",   info["ram_used"])
+        row("RAM %",      info["ram_pct"])
+        row("Disk total", info["disk_total"])
+        row("Disk used",  info["disk_used"])
+    else:
+        row("RAM/Disk",   info["ram_total"])
+    row("Executable",    info["exe"])
+    row("Prefix",        info["prefix"])
+    sep("─", DIM)
+
+    print(f"\n  {dev_time()}  {DIM}wanwat State{R}")
+    sep("─", DIM)
+    row("Config path",   CONFIG_PATH)
+    row("Local version", LOCAL_VERSION)
+    row("Selected pkgs", str(len(cfg.get("selected", []))))
+    row("Installed pkgs",str(len([p for p in all_deps() if is_installed(p)])))
+    row("Dev mode",      "ON")
+    sep("─", DIM)
+
+    print(f"\n  {DIM}[1] Reinstall all   [2] pip list   [3] pip check   [4] reload{R}")
+    print(f"  {DIM}[q] Exit dev mode{R}\n")
+    sep()
+    print(f"\n  {BLUE}dev>{R} ", end="")
+    cmd = input().strip().lower()
+
+    if cmd == "q":
+        cfg["dev_mode"] = False
+        save_config(cfg)
+        return False
+    elif cmd == "1":
+        install_deps(all_deps(), dev_mode=True)
+        input(f"\n  {DIM}Press Enter...{R}")
+    elif cmd == "2":
+        print()
+        subprocess.run([sys.executable, "-m", "pip", "list"])
+        input(f"\n  {DIM}Press Enter...{R}")
+    elif cmd == "3":
+        print()
+        subprocess.run([sys.executable, "-m", "pip", "check"])
+        input(f"\n  {DIM}Press Enter...{R}")
+    elif cmd == "4":
+        pass
+    else:
+        print(f"  {YELLOW}Unknown command.{R}")
+        time.sleep(0.8)
+    return True
+
+# ─── MAIN MENU ───────────────────────────────────────────────────────────────
+
+def main_menu():
+    global _serious_mode
+    cfg        = load_config()
+    dev_mode   = cfg.get("dev_mode", False)
+    remote_ver = get_remote_version()   # non-blocking enough for menu use
+
+    if dev_mode:
+        while developer_mode_menu(cfg):
+            clear()
+        dev_mode = False
+
+    while True:
+        clear()
+        banner(cfg, remote_ver)
+
+        dm_tag = f"  {BLUE}[DEV]{R}" if dev_mode else ""
+        sm_tag = f"  {ghost_raw('[serious]')}" if _serious_mode else ""
+
+        print(f"\n  {BOLD}Commands{R}{dm_tag}{sm_tag}\n")
+        sep("·")
+
+        # Two-column layout
+        cmds = [
+            (f"{CYAN}installdeps{R}",   "Install selected dependencies"),
+            (f"{CYAN}deps{R}",          "Manage packages & wanpacks"),
+            (f"{CYAN}updatelogs{R}",    "View update logs from GitHub"),
+            (f"{CYAN}developermode{R}", "Developer debug mode"),
+            (f"{CYAN}quit{R}",          "Exit wanwat"),
+        ]
+        for cmd_text, desc in cmds:
+            print(f"  {cmd_text:<30}  {DIM}{desc}{R}")
+
+        # Newest log teaser
+        cache = load_cached_logs()
+        if cache:
+            latest_ver = list(cache.keys())[-1]
+            latest_entry = cache[latest_ver]
+            latest_lines = latest_entry.get("log","").splitlines()
+            teaser = latest_lines[0][:60] if latest_lines else ""
+            print(f"\n  {DIM}────  newest log  ·  {latest_ver}  ────{R}")
+            print(f"  {DIM}{teaser}{'…' if len(teaser) == 60 else ''}{R}")
+
+        print()
+        sep()
+
+        if dev_mode:
+            print(f"\n  {BLUE}{datetime.datetime.now().strftime('%H:%M:%S')}{R}  {DIM}debug active{R}")
+
+        print(f"\n  {DIM}wanwat>{R} ", end="")
+        cmd = input().strip().lower()
+
+        # ── secret trigger ──────────────────────────────────────────────────
+        if cmd == "serious":
+            _serious_mode = not _serious_mode
+            if _serious_mode:
+                serious_banner()
+                time.sleep(1.2)
+            continue
+
+        if cmd == "installdeps":
+            selected = cfg.get("selected", all_deps())
+            if not selected:
+                selected = all_deps()
+            serious_log(f"INSTALLDEPS called — {len(selected)} packages queued")
+            installed_ok = install_deps(selected, dev_mode)
+            if installed_ok:
+                cfg["installed"] = list(set(cfg.get("installed", []) + installed_ok))
+                save_config(cfg)
+            input(f"\n  {DIM}Press Enter...{R}")
+
+        elif cmd == "deps":
+            serious_log("ENTERING deps menu")
+            deps_menu(cfg, dev_mode, remote_ver)
+
+        elif cmd == "updatelogs":
+            serious_log("ENTERING update logs menu")
+            update_logs_menu()
+
+        elif cmd == "developermode":
+            cfg["dev_mode"] = True
+            save_config(cfg)
+            clear()
+            while developer_mode_menu(cfg):
+                clear()
+            dev_mode = False
+
+        elif cmd in ("quit", "exit", "q"):
+            clear()
+            print(f"\n  {CYAN}Thanks for using wanwat. Goodbye!{R}\n")
+            sys.exit(0)
+
+        else:
+            print(f"\n  {YELLOW}Unknown command.{R}  {DIM}Try: installdeps, deps, updatelogs, developermode, quit{R}")
+            time.sleep(1.2)
+
+# ─── ENTRY POINT ─────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        arg = sys.argv[1].lower()
+        cfg = load_config()
+        if arg == "installdeps":
+            install_deps(cfg.get("selected", all_deps()))
+        elif arg == "deps":
+            deps_menu(cfg)
+        elif arg == "updatelogs":
+            update_logs_menu()
+        elif arg == "developermode":
+            cfg["dev_mode"] = True
+            save_config(cfg)
+            while developer_mode_menu(cfg):
+                clear()
+        elif arg == "quit":
+            sys.exit(0)
+        else:
+            print(f"{RED}Unknown command: {arg}{R}")
+            print(f"Usage: python wanwat.py [installdeps|deps|updatelogs|developermode|quit]")
+    else:
+        startup_version_check()
+        main_menu()
